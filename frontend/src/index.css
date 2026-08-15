@@ -1,0 +1,196 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  CivicPulse Design System — professional civic-tech.
+  Palette: institutional civic blue primary + smart-city teal accent + cool neutrals.
+  All tokens in HSL space-separated format for Tailwind hsl() consumption.
+*/
+
+@layer base {
+  :root {
+    /* Surfaces */
+    --background: 210 40% 98%;
+    --foreground: 217 33% 16%;
+    --card: 0 0% 100%;
+    --card-foreground: 217 33% 16%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 217 33% 16%;
+
+    /* Brand */
+    --primary: 214 88% 43%;
+    --primary-foreground: 0 0% 100%;
+    --primary-glow: 205 90% 55%;
+
+    --secondary: 214 32% 93%;
+    --secondary-foreground: 217 33% 22%;
+
+    --muted: 214 28% 95%;
+    --muted-foreground: 216 14% 47%;
+
+    --accent: 188 86% 34%;
+    --accent-foreground: 0 0% 100%;
+
+    /* States */
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 56% 37%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 46%;
+    --warning-foreground: 30 45% 12%;
+    --info: 210 80% 48%;
+    --info-foreground: 0 0% 100%;
+
+    /* Priority scale (do NOT rely on colour alone — always pair with icon+label) */
+    --priority-low: 205 55% 48%;
+    --priority-medium: 38 92% 46%;
+    --priority-high: 24 90% 50%;
+    --priority-critical: 0 74% 51%;
+
+    /* Lines & controls */
+    --border: 214 24% 88%;
+    --input: 214 24% 86%;
+    --ring: 214 88% 43%;
+
+    /* Dashboard sidebar (command-center navy) */
+    --sidebar: 217 44% 12%;
+    --sidebar-foreground: 210 26% 82%;
+    --sidebar-muted: 214 16% 58%;
+    --sidebar-accent: 205 90% 58%;
+    --sidebar-border: 217 26% 22%;
+
+    /* Charts */
+    --chart-1: 214 88% 48%;
+    --chart-2: 188 80% 38%;
+    --chart-3: 38 92% 52%;
+    --chart-4: 152 54% 42%;
+    --chart-5: 258 46% 58%;
+
+    /* Gradients (dark endpoints so white text stays legible) */
+    --gradient-brand: linear-gradient(135deg, hsl(214 88% 40%), hsl(196 88% 40%));
+    --gradient-hero: linear-gradient(180deg, hsl(217 48% 11% / 0.86), hsl(214 55% 18% / 0.72));
+    --gradient-subtle: linear-gradient(180deg, hsl(210 40% 99%), hsl(214 32% 95%));
+
+    /* Elevation */
+    --shadow-sm: 0 1px 2px hsl(214 40% 25% / 0.06);
+    --shadow-card: 0 1px 3px hsl(214 40% 25% / 0.05), 0 6px 20px -6px hsl(214 40% 25% / 0.10);
+    --shadow-elevated: 0 16px 44px -14px hsl(214 55% 22% / 0.24);
+    --shadow-glow: 0 0 0 1px hsl(214 88% 43% / 0.10), 0 10px 30px -8px hsl(214 88% 43% / 0.28);
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 217 44% 8%;
+    --foreground: 210 30% 94%;
+    --card: 217 40% 11%;
+    --card-foreground: 210 30% 94%;
+    --popover: 217 40% 11%;
+    --popover-foreground: 210 30% 94%;
+    --primary: 205 90% 56%;
+    --primary-foreground: 217 44% 8%;
+    --primary-glow: 205 90% 62%;
+    --secondary: 217 30% 17%;
+    --secondary-foreground: 210 30% 94%;
+    --muted: 217 28% 16%;
+    --muted-foreground: 215 18% 64%;
+    --accent: 188 74% 44%;
+    --accent-foreground: 217 44% 8%;
+    --destructive: 0 66% 52%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 52% 44%;
+    --warning: 38 90% 54%;
+    --border: 217 28% 20%;
+    --input: 217 28% 20%;
+    --ring: 205 90% 56%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  h1, h2, h3, h4, h5 {
+    font-family: 'Space Grotesk', 'Inter', sans-serif;
+    letter-spacing: -0.02em;
+  }
+  .font-mono, .tabular {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .text-gradient-brand {
+    background: linear-gradient(120deg, hsl(214 88% 38%), hsl(196 84% 40%));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .bg-grid {
+    background-image:
+      linear-gradient(hsl(214 30% 88% / 0.5) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(214 30% 88% / 0.5) 1px, transparent 1px);
+    background-size: 28px 28px;
+  }
+  .glass {
+    background: hsl(0 0% 100% / 0.72);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .card-shadow { box-shadow: var(--shadow-card); }
+  .elevated { box-shadow: var(--shadow-elevated); }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(214 20% 78%);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(214 20% 68%); }
+
+  @keyframes fade-in-up {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes pulse-ring {
+    0% { transform: scale(0.9); opacity: 0.7; }
+    70% { transform: scale(1.6); opacity: 0; }
+    100% { opacity: 0; }
+  }
+  @keyframes scan {
+    0% { transform: translateY(0); }
+    100% { transform: translateY(100%); }
+  }
+  .animate-fade-in-up { animation: fade-in-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .animate-fade-in { animation: fade-in 0.5s ease both; }
+  .animate-pulse-ring { animation: pulse-ring 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+}
+
+@layer base {
+  [data-debug-wrapper="true"] { display: contents !important; }
+}

@@ -16,6 +16,7 @@ import { PriorityBadge, DepartmentChip } from '@/components/common/Badges';
 import { StylizedCityMap } from '@/components/common/StylizedCityMap';
 import { complaintApi } from '@/lib/api';
 import { fileToCompressedBase64 } from '@/lib/format';
+import { t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 const PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
@@ -26,7 +27,7 @@ const WARDS = [
   { name: 'Yelahanka', lat: 13.1007, lng: 77.5963 }, { name: 'BTM Layout', lat: 12.9166, lng: 77.6101 },
   { name: 'Rajajinagar', lat: 12.9915, lng: 77.5551 }, { name: 'Hebbal', lat: 13.0358, lng: 77.597 },
 ];
-const STEPS = ['Evidence', 'Describe', 'Location', 'AI Analysis', 'Confirm'];
+const STEP_KEYS = ['step_evidence', 'step_describe', 'step_location', 'step_analysis', 'step_confirm'];
 
 export default function ReportIssue() {
   const navigate = useNavigate();

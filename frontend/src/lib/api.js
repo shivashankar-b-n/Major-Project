@@ -40,6 +40,7 @@ export const complaintApi = {
   resolution: (id, body) => unwrap(api.post(`/complaints/${id}/resolution`, body)),
   verify: (id, body) => unwrap(api.post(`/complaints/${id}/verify`, body)),
   feedback: (id, body) => unwrap(api.post(`/complaints/${id}/feedback`, body)),
+  support: (id) => unwrap(api.post(`/complaints/${id}/support`)),
 };
 
 export const notificationApi = {
@@ -52,6 +53,8 @@ export const analyticsApi = {
   overview: (params) => unwrap(api.get('/analytics/overview', { params })),
   departmentPerformance: () => unwrap(api.get('/analytics/department-performance')),
   mapPoints: () => unwrap(api.get('/map/points')),
+  incidents: () => unwrap(api.get('/incidents')),
+  citySignals: () => unwrap(api.get('/city-signals')),
 };
 
 export const dataApi = {
@@ -59,6 +62,8 @@ export const dataApi = {
   reports: (params) => unwrap(api.get('/reports', { params })),
   report: (id) => unwrap(api.get(`/reports/${id}`)),
   users: () => unwrap(api.get('/admin/users')),
+  scheduler: () => unwrap(api.get('/scheduler')),
+  runScheduler: () => unwrap(api.post('/scheduler/run')),
 };
 
 export default api;

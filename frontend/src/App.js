@@ -3,6 +3,7 @@ import '@/App.css';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from '@/components/ui/sonner';
 import { AuthProvider } from '@/contexts/AuthContext';
+import { LanguageProvider, useLang } from '@/contexts/LanguageContext';
 import { ProtectedRoute } from '@/components/common/ProtectedRoute';
 
 import { CitizenShell } from '@/components/layout/CitizenShell';
@@ -35,13 +36,13 @@ import AdminUsers from '@/pages/admin/Users';
 
 import ComplaintWork from '@/pages/shared/ComplaintWork';
 
-function App() {
+function AppRoutes() {
+  const { lang } = useLang();
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          {/* Public */}
-          <Route path="/" element={<Landing />} />
+    <React.Fragment key={lang}>
+      <Routes>
+        {/* Public */}
+        <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
 
@@ -88,8 +89,19 @@ function App() {
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-        <Toaster position="top-center" richColors closeButton />
-      </BrowserRouter>
+    </React.Fragment>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <LanguageProvider>
+        <BrowserRouter>
+          <AppRoutes />
+          <Toaster position="top-center" richColors closeButton />
+        </BrowserRouter>
+      </LanguageProvider>
     </AuthProvider>
   );
 }

@@ -18,6 +18,8 @@ import math
 import hashlib
 import logging
 import random
+import asyncio
+import requests
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
@@ -491,6 +493,7 @@ async def create_complaint(body: ComplaintIn, user: Dict[str, Any] = Depends(req
         ],
         'resolution': None, 'feedback': None,
         'duplicate_group_id': dup_group, 'is_duplicate': bool(dup_group),
+        'supporters': [], 'support_count': 0,
         'sla': {'due_at': iso(sla_due(body.priority, ts)), 'breached': False},
         'created_at': iso(ts), 'updated_at': iso(ts), 'is_demo': False,
     }
@@ -554,8 +557,75 @@ async def list_complaints(
 async def nearby(user: Dict[str, Any] = Depends(get_current_user)):
     docs = await db.complaints.find(
         {'status': {'$nin': ['CANCELLED', 'REJECTED']}}, {'_id': 0}
-    ).sort('created_at', -1).to_list(12)
-    return [public_complaint(d, 'public') for d in docs]
+    ).sort('created_at', -1).to_list(20)
+    out = []
+    for d in docs:
+        is_own = d.get('citizen_id') == user['id']
+        supported = user['id'] in (d.get('supporters') or [])
+        pub = public_complaint(d, 'public')
+        pub['support_count'] = d.get('support_count', 0)
+        pub['supported'] = supported
+        pub['is_own'] = is_own
+        out.append(pub)
+    return out
+
+
+@api.post('/complaints/{cid}/support')
+async def support_complaint(cid: str, user: Dict[str, Any] = Depends(require_roles('citizen'))):
+    """Citizens 'rally' behind an existing incident instead of filing a duplicate."""
+    c = await db.complaints.find_one({'id': cid}, {'_id': 0})
+    if not c:
+        raise HTTPException(status_code=404, detail='Complaint not found')
+    if c.get('citizen_id') == user['id']:
+        raise HTTPException(status_code=400, detail='You already reported this incident')
+    supporters = set(c.get('supporters') or [])
+    if user['id'] in supporters:
+        supporters.discard(user['id'])
+        supported = False
+    else:
+        supporters.add(user['id'])
+        supported = True
+    await db.complaints.update_one({'id': cid}, {'$set': {'supporters': list(supporters), 'support_count': len(supporters)}})
+    if supported:
+        await push_notification(c['citizen_id'], 'status', 'More residents affected',
+                                f"Another resident confirmed {c['tracking_id']} \u2014 {len(supporters)} now backing this report", cid)
+    return {'supported': supported, 'support_count': len(supporters)}
+
+
+@api.get('/incidents')
+async def grouped_incidents(user: Dict[str, Any] = Depends(get_current_user)):
+    """Group complaints into master incidents (by duplicate group / proximity) for the map."""
+    query: Dict[str, Any] = {'status': {'$nin': ['CANCELLED', 'REJECTED']}}
+    if user['role'] == 'officer':
+        query['department'] = user.get('department')
+    docs = await db.complaints.find(query, {'_id': 0}).to_list(3000)
+    groups: Dict[str, Dict[str, Any]] = {}
+    pr_rank = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3}
+    for d in docs:
+        gid = d.get('duplicate_group_id') or d['id']
+        g = groups.get(gid)
+        if not g:
+            groups[gid] = {
+                'group_id': gid, 'title': d['title'], 'department': d['department'],
+                'category': d.get('category'), 'priority': d.get('priority', 'LOW'),
+                'location': d.get('location'), 'reports': 1,
+                'supporters': d.get('support_count', 0), 'lead_id': d['id'],
+                'created_at': d.get('created_at'),
+            }
+        else:
+            g['reports'] += 1
+            g['supporters'] += d.get('support_count', 0)
+            if pr_rank.get(d.get('priority', 'LOW'), 0) > pr_rank.get(g['priority'], 0):
+                g['priority'] = d.get('priority')
+            if d.get('created_at', '') < g.get('created_at', ''):
+                g['location'] = d.get('location')
+                g['lead_id'] = d['id']
+                g['created_at'] = d.get('created_at')
+    result = list(groups.values())
+    for g in result:
+        g['total_voices'] = g['reports'] + g['supporters']
+    result.sort(key=lambda x: x['total_voices'], reverse=True)
+    return result
 
 
 @api.get('/complaints/{cid}')
@@ -856,6 +926,179 @@ async def admin_users(user: Dict[str, Any] = Depends(require_roles('admin'))):
 
 
 # ---------------------------------------------------------------------------
+# Routes: Live City Signals (REAL open data via Open-Meteo, no API key needed)
+# ---------------------------------------------------------------------------
+CITY_LAT, CITY_LNG = 12.9716, 77.5946
+_signals_cache = {'data': None, 'at': None}
+WEATHER_CODES = {0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog',
+                 48: 'Rime fog', 51: 'Light drizzle', 53: 'Drizzle', 55: 'Dense drizzle', 61: 'Light rain',
+                 63: 'Rain', 65: 'Heavy rain', 66: 'Freezing rain', 71: 'Light snow', 80: 'Rain showers',
+                 81: 'Rain showers', 82: 'Violent rain showers', 95: 'Thunderstorm', 96: 'Thunderstorm w/ hail',
+                 99: 'Thunderstorm w/ hail'}
+
+
+def _fetch_signals_sync():
+    out = {'source': 'Open-Meteo (open data, no API key required)', 'city': 'Bengaluru'}
+    weather = None
+    try:
+        w = requests.get('https://api.open-meteo.com/v1/forecast', params={
+            'latitude': CITY_LAT, 'longitude': CITY_LNG,
+            'current': 'temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m',
+            'timezone': 'Asia/Kolkata'}, timeout=8).json()
+        cur = w.get('current', {}) or {}
+        if cur.get('temperature_2m') is not None:
+            weather = {
+                'temperature': cur.get('temperature_2m'), 'humidity': cur.get('relative_humidity_2m'),
+                'precipitation': cur.get('precipitation'), 'wind_speed': cur.get('wind_speed_10m'),
+                'weather_code': cur.get('weather_code'),
+                'description': WEATHER_CODES.get(cur.get('weather_code'), 'Unknown'),
+                'provider': 'Open-Meteo',
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'open-meteo weather failed: {e}')
+    if not weather:
+        try:  # fallback: wttr.in (free, no key)
+            j = requests.get('https://wttr.in/Bengaluru', params={'format': 'j1'},
+                             headers={'User-Agent': 'curl/8'}, timeout=8).json()
+            cc = (j.get('current_condition') or [{}])[0]
+            def _num(x):
+                try:
+                    return float(x)
+                except (TypeError, ValueError):
+                    return None
+            weather = {
+                'temperature': _num(cc.get('temp_C')), 'humidity': _num(cc.get('humidity')),
+                'precipitation': _num(cc.get('precipMM')), 'wind_speed': _num(cc.get('windspeedKmph')),
+                'weather_code': None,
+                'description': (cc.get('weatherDesc') or [{}])[0].get('value', 'Unknown'),
+                'provider': 'wttr.in',
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'wttr.in weather failed: {e}')
+    out['weather'] = weather
+    try:
+        lats = ','.join([str(CITY_LAT)] + [str(WARD_COORDS[w][0]) for w in WARDS])
+        lngs = ','.join([str(CITY_LNG)] + [str(WARD_COORDS[w][1]) for w in WARDS])
+        aq = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+            'latitude': lats, 'longitude': lngs, 'current': 'us_aqi,pm2_5,pm10',
+            'timezone': 'Asia/Kolkata'}, timeout=8).json()
+        items = aq if isinstance(aq, list) else [aq]
+        city = (items[0].get('current', {}) if items else {}) or {}
+        out['air_quality'] = {'us_aqi': city.get('us_aqi'), 'pm2_5': city.get('pm2_5'), 'pm10': city.get('pm10')}
+        wards = []
+        for i, wname in enumerate(WARDS):
+            idx = i + 1
+            if idx < len(items):
+                c = (items[idx].get('current', {}) or {})
+                wards.append({'ward': wname, 'us_aqi': c.get('us_aqi'), 'pm2_5': c.get('pm2_5')})
+        out['ward_air_quality'] = sorted(wards, key=lambda x: (x['us_aqi'] or 0), reverse=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'air quality fetch failed: {e}')
+        out['air_quality'] = None
+        out['ward_air_quality'] = []
+    return out
+
+
+async def get_city_signals(force=False):
+    nowi = now_utc()
+    cache = _signals_cache
+    if not force and cache['data'] and cache['at'] and (nowi - cache['at']).total_seconds() < 1200:
+        return {**cache['data'], 'fetched_at': iso(cache['at']), 'cached': True}
+    data = await asyncio.to_thread(_fetch_signals_sync)
+    cache['data'] = data
+    cache['at'] = nowi
+    return {**data, 'fetched_at': iso(nowi), 'cached': False}
+
+
+@api.get('/city-signals')
+async def city_signals(user: Dict[str, Any] = Depends(get_current_user)):
+    return await get_city_signals()
+
+
+# ---------------------------------------------------------------------------
+# Routes: Report Scheduler (auto-generate & deliver 12-hour reports)
+# ---------------------------------------------------------------------------
+SCHED_INTERVAL_HOURS = 12
+
+
+async def ensure_scheduler():
+    st = await db.scheduler_state.find_one({'id': 'default'}, {'_id': 0})
+    if not st:
+        nowi = now_utc()
+        st = {'id': 'default', 'enabled': True, 'interval_hours': SCHED_INTERVAL_HOURS,
+              'last_run': iso(nowi), 'next_run': iso(nowi + timedelta(hours=SCHED_INTERVAL_HOURS)),
+              'last_reports': 0, 'last_deliveries': 0, 'last_trigger': 'seed'}
+        await db.scheduler_state.insert_one(dict(st))
+    return st
+
+
+async def deliver_reports(reports, triggered_by='scheduler'):
+    admins = await db.users.find({'role': 'admin'}, {'_id': 0}).to_list(50)
+    officers = await db.users.find({'role': 'officer'}, {'_id': 0}).to_list(300)
+    delivered = 0
+    for r in reports:
+        if r.get('scope') == 'city':
+            recipients = [(a['id'], a['name'], 'admin') for a in admins]
+        else:
+            recipients = [(o['id'], o['name'], 'officer') for o in officers if o.get('department') == r.get('department')]
+        for rid, rname, role in recipients:
+            await db.report_deliveries.insert_one({
+                'id': str(uuid.uuid4()), 'report_id': r['id'], 'report_title': r['title'],
+                'scope': r.get('scope'), 'department': r.get('department'),
+                'recipient_id': rid, 'recipient_name': rname, 'recipient_role': role,
+                'channel': 'in-app (email/SMS queued*)', 'status': 'delivered',
+                'triggered_by': triggered_by, 'at': iso(now_utc()), 'is_demo': triggered_by == 'seed',
+            })
+            await push_notification(rid, 'report', 'Intelligence report ready', f"{r['title']} has been delivered", None)
+            delivered += 1
+    return delivered
+
+
+async def run_report_cycle(triggered_by='scheduler'):
+    reports = await generate_period_reports(gen_at=now_utc(), is_demo=(triggered_by == 'seed'))
+    delivered = await deliver_reports(reports, triggered_by)
+    nowi = now_utc()
+    await db.scheduler_state.update_one({'id': 'default'}, {'$set': {
+        'id': 'default', 'enabled': True, 'interval_hours': SCHED_INTERVAL_HOURS,
+        'last_run': iso(nowi), 'next_run': iso(nowi + timedelta(hours=SCHED_INTERVAL_HOURS)),
+        'last_reports': len(reports), 'last_deliveries': delivered, 'last_trigger': triggered_by,
+    }}, upsert=True)
+    return {'reports': len(reports), 'deliveries': delivered}
+
+
+async def scheduler_loop():
+    await asyncio.sleep(25)
+    while True:
+        try:
+            st = await ensure_scheduler()
+            nr = st.get('next_run')
+            if st.get('enabled') and nr and datetime.fromisoformat(nr) <= now_utc():
+                logger.info('Scheduler: running 12-hour report cycle')
+                await run_report_cycle('scheduler')
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'scheduler loop error: {e}')
+        await asyncio.sleep(300)
+
+
+@api.get('/scheduler')
+async def scheduler_status(user: Dict[str, Any] = Depends(require_roles('officer', 'admin'))):
+    st = await ensure_scheduler()
+    st.pop('_id', None)
+    dq: Dict[str, Any] = {}
+    if user['role'] == 'officer':
+        dq = {'recipient_id': user['id']}
+    deliveries = await db.report_deliveries.find(dq, {'_id': 0}).sort('at', -1).to_list(40)
+    return {'state': st, 'deliveries': deliveries}
+
+
+@api.post('/scheduler/run')
+async def scheduler_run(user: Dict[str, Any] = Depends(require_roles('admin'))):
+    res = await run_report_cycle('manual')
+    await audit('scheduler_run', user, res)
+    return res
+
+
+# ---------------------------------------------------------------------------
 # Demo data seeding
 # ---------------------------------------------------------------------------
 WARD_COORDS = {
@@ -997,12 +1240,54 @@ async def seed_demo():
                     'assigned_officer_id': assigned_id, 'assigned_officer_name': assigned_name,
                     'status_history': hist, 'resolution': resolution, 'feedback': feedback,
                     'duplicate_group_id': None, 'is_duplicate': False,
+                    'supporters': [], 'support_count': 0,
                     'sla': {'due_at': iso(sla_due(priority, created)), 'breached': False},
                     'created_at': iso(created), 'updated_at': iso(created), 'is_demo': True,
                 }
                 await db.complaints.insert_one(complaint)
 
-    # Notifications for demo citizen
+    # Explicit duplicate clusters (master incidents citizens can rally behind)
+    clusters = [
+        ('Waste Management', 'Garbage dump overflowing at street corner', 'MEDIUM', 'Garbage', 'HSR Layout', 4),
+        ('Water & Sewage', 'Major water pipeline burst flooding the lane', 'HIGH', 'Pipeline Leak', 'Indiranagar', 3),
+        ('Roads & Infrastructure', 'Dangerous pothole cluster on main road', 'HIGH', 'Pothole', 'Koramangala', 3),
+    ]
+    for dept, text, pr, cat, ward, n in clusters:
+        base = WARD_COORDS[ward]
+        group_created = now_utc() - timedelta(hours=random.randint(6, 40))
+        group_id = None
+        supporters_pool = [cid for cid, _ in citizen_ids]
+        for k in range(n):
+            reporter_id, reporter_name = citizen_ids[(k + 1) % len(citizen_ids)]
+            lat = base[0] + random.uniform(-0.0008, 0.0008)
+            lng = base[1] + random.uniform(-0.0008, 0.0008)
+            created = group_created + timedelta(minutes=15 * k)
+            cid = str(uuid.uuid4())
+            if group_id is None:
+                group_id = cid
+            count += 1
+            supers = random.sample(supporters_pool, random.randint(2, 5))
+            comp = {
+                'id': cid, 'tracking_id': gen_tracking_id(count),
+                'citizen_id': reporter_id, 'citizen_name': reporter_name,
+                'title': text, 'description': text + '. Multiple residents affected.',
+                'department': dept, 'category': cat, 'priority': pr, 'ai_confidence': random.randint(82, 95),
+                'ai_prediction': {'detected_issue': text, 'department': dept, 'category': cat, 'priority': pr,
+                                  'confidence': random.randint(82, 95), 'reasoning': 'Grouped with nearby duplicate reports.',
+                                  'tags': [cat.lower()], 'safety_flag': pr == 'CRITICAL', 'source': 'llm'},
+                'status': 'ASSIGNED' if k == 0 else 'ROUTED',
+                'location': {'lat': round(lat, 6), 'lng': round(lng, 6), 'address': f'{ward}, Bengaluru', 'ward': ward},
+                'media': [{'type': 'image', 'data': None, 'name': 'evidence.jpg'}],
+                'assigned_officer_id': None, 'assigned_officer_name': None,
+                'status_history': [{'status': 'NEW', 'note': 'Complaint submitted by citizen', 'by': reporter_name, 'at': iso(created)},
+                                   {'status': 'ROUTED', 'note': f'AI routed to {dept}; grouped as possible duplicate', 'by': 'AI Triage Engine', 'at': iso(created)}],
+                'resolution': None, 'feedback': None,
+                'duplicate_group_id': group_id, 'is_duplicate': group_id != cid,
+                'supporters': supers, 'support_count': len(supers),
+                'sla': {'due_at': iso(sla_due(pr, created)), 'breached': False},
+                'created_at': iso(created), 'updated_at': iso(created), 'is_demo': True,
+            }
+            await db.complaints.insert_one(comp)
     demo_complaints = await db.complaints.find({'citizen_id': citizen['id']}, {'_id': 0}).to_list(20)
     for dc in demo_complaints[:6]:
         await push_notification(citizen['id'], 'status', 'Complaint update',
@@ -1031,61 +1316,78 @@ async def seed_demo():
 
     # Intelligence reports (12-hour) — city + per department
     await generate_reports_seed()
+    # Scheduler + initial deliveries to department heads / admins
+    await ensure_scheduler()
+    latest = await db.analytics_reports.find({}, {'_id': 0}).sort('generated_at', -1).to_list(8)
+    await deliver_reports(latest, 'seed')
     logger.info('Demo seeding complete.')
+
+
+async def generate_period_reports(gen_at=None, is_demo=True):
+    """Generate one city report + seven department reports for the 12h window ending at gen_at.
+
+    Returns the list of created report docs (used by the scheduler for delivery)."""
+    nowi = gen_at or now_utc()
+    window_start = nowi - timedelta(hours=12)
+    all_docs = await db.complaints.find({}, {'_id': 0}).to_list(5000)
+    window_docs = [d for d in all_docs if window_start.isoformat() <= d.get('created_at', '') <= nowi.isoformat()]
+    resolved = len([d for d in all_docs if d['status'] == 'RESOLVED'])
+    active = len([d for d in all_docs if d['status'] not in ['RESOLVED', 'REJECTED', 'CANCELLED']])
+    critical = [d for d in all_docs if d.get('priority') == 'CRITICAL' and d['status'] not in ['RESOLVED']]
+    ward_counts = {}
+    for d in all_docs:
+        w = (d.get('location') or {}).get('ward', 'Unknown')
+        ward_counts[w] = ward_counts.get(w, 0) + 1
+    hotspots = sorted(ward_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_ward = hotspots[0][0] if hotspots else 'the city'
+    created = []
+    city = {
+        'id': str(uuid.uuid4()), 'scope': 'city', 'department': None,
+        'title': f"City Intelligence Report \u2014 {nowi.strftime('%d %b, %I %p')}",
+        'period_label': f"{window_start.strftime('%d %b %I%p')} \u2192 {nowi.strftime('%d %b %I%p')}",
+        'generated_at': iso(nowi),
+        'summary': {'new_reports': len(window_docs), 'resolved': resolved, 'active': active,
+                    'critical': len(critical), 'sla_breaches': random.randint(2, 9)},
+        'hotspots': [{'ward': w, 'count': c} for w, c in hotspots],
+        'repeated_issues': [f'Garbage accumulation in {top_ward}', 'Recurring pipeline leaks in Indiranagar'],
+        'trends': ['Waste Management reports up 14% vs previous period',
+                   'Electricity CRITICAL reports concentrated near Whitefield',
+                   'Faster resolution times in Traffic (avg 11h)'],
+        'recommendations': [f'Pre-position waste crews in {top_ward} ahead of peak demand',
+                            'Dispatch electrical safety inspection to Whitefield exposed-wire cluster',
+                            'Review Water & Sewage SLA \u2014 complaints approaching breach'],
+        'is_demo': is_demo,
+    }
+    await db.analytics_reports.insert_one(dict(city))
+    created.append(city)
+    for dept in DEPARTMENTS:
+        dept_docs = [d for d in all_docs if d['department'] == dept]
+        dnew = len([d for d in window_docs if d['department'] == dept])
+        dres = len([d for d in dept_docs if d['status'] == 'RESOLVED'])
+        dactive = len([d for d in dept_docs if d['status'] not in ['RESOLVED', 'REJECTED', 'CANCELLED']])
+        rpt = {
+            'id': str(uuid.uuid4()), 'scope': 'department', 'department': dept,
+            'title': f"{dept} Report \u2014 {nowi.strftime('%d %b, %I %p')}",
+            'period_label': f"{window_start.strftime('%d %b %I%p')} \u2192 {nowi.strftime('%d %b %I%p')}",
+            'generated_at': iso(nowi),
+            'summary': {'new_reports': dnew, 'resolved': dres, 'active': dactive,
+                        'critical': len([d for d in dept_docs if d.get('priority') == 'CRITICAL']),
+                        'sla_breaches': random.randint(0, 4)},
+            'hotspots': [{'ward': w, 'count': c} for w, c in hotspots[:2]],
+            'repeated_issues': [f'Recurring {dept.split(" ")[0].lower()} issues in high-density wards'],
+            'trends': [f'{dept} workload steady vs previous 12h window'],
+            'recommendations': [f'Prioritise CRITICAL {dept} tickets and confirm field crew availability'],
+            'is_demo': is_demo,
+        }
+        await db.analytics_reports.insert_one(dict(rpt))
+        created.append(rpt)
+    return created
 
 
 async def generate_reports_seed():
     nowi = now_utc()
-    all_docs = await db.complaints.find({}, {'_id': 0}).to_list(5000)
     for period in range(2):
-        gen_at = nowi - timedelta(hours=12 * period)
-        window_start = gen_at - timedelta(hours=12)
-        window_docs = [d for d in all_docs if window_start.isoformat() <= d.get('created_at', '') <= gen_at.isoformat()]
-        new_reports = len(window_docs)
-        resolved = len([d for d in all_docs if d['status'] == 'RESOLVED'])
-        active = len([d for d in all_docs if d['status'] not in ['RESOLVED', 'REJECTED', 'CANCELLED']])
-        critical = [d for d in all_docs if d.get('priority') == 'CRITICAL' and d['status'] not in ['RESOLVED']]
-        ward_counts = {}
-        for d in all_docs:
-            w = (d.get('location') or {}).get('ward', 'Unknown')
-            ward_counts[w] = ward_counts.get(w, 0) + 1
-        hotspots = sorted(ward_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-        await db.analytics_reports.insert_one({
-            'id': str(uuid.uuid4()), 'scope': 'city', 'department': None,
-            'title': f"City Intelligence Report — {gen_at.strftime('%d %b, %I %p')}",
-            'period_label': f"{window_start.strftime('%d %b %I%p')} → {gen_at.strftime('%d %b %I%p')}",
-            'generated_at': iso(gen_at),
-            'summary': {'new_reports': new_reports, 'resolved': resolved, 'active': active,
-                        'critical': len(critical), 'sla_breaches': random.randint(2, 9)},
-            'hotspots': [{'ward': w, 'count': c} for w, c in hotspots],
-            'repeated_issues': ['Garbage accumulation in HSR Layout', 'Recurring pipeline leaks in Indiranagar'],
-            'trends': ['Waste Management reports up 14% vs previous period',
-                       'Electricity CRITICAL reports concentrated near Whitefield',
-                       'Faster resolution times in Traffic (avg 11h)'],
-            'recommendations': ['Pre-position waste crews in HSR Layout ahead of weekend peak',
-                                'Dispatch electrical safety inspection to Whitefield exposed-wire cluster',
-                                'Review Water & Sewage SLA — 3 complaints approaching breach'],
-            'is_demo': True,
-        })
-        for dept in DEPARTMENTS:
-            dept_docs = [d for d in all_docs if d['department'] == dept]
-            dnew = len([d for d in window_docs if d['department'] == dept])
-            dres = len([d for d in dept_docs if d['status'] == 'RESOLVED'])
-            dactive = len([d for d in dept_docs if d['status'] not in ['RESOLVED', 'REJECTED', 'CANCELLED']])
-            await db.analytics_reports.insert_one({
-                'id': str(uuid.uuid4()), 'scope': 'department', 'department': dept,
-                'title': f"{dept} Report — {gen_at.strftime('%d %b, %I %p')}",
-                'period_label': f"{window_start.strftime('%d %b %I%p')} → {gen_at.strftime('%d %b %I%p')}",
-                'generated_at': iso(gen_at),
-                'summary': {'new_reports': dnew, 'resolved': dres, 'active': dactive,
-                            'critical': len([d for d in dept_docs if d.get('priority') == 'CRITICAL']),
-                            'sla_breaches': random.randint(0, 4)},
-                'hotspots': [{'ward': w, 'count': c} for w, c in hotspots[:2]],
-                'repeated_issues': [f'Recurring {dept.split(" ")[0].lower()} issues in high-density wards'],
-                'trends': [f'{dept} workload steady vs previous 12h window'],
-                'recommendations': [f'Prioritise CRITICAL {dept} tickets and confirm field crew availability'],
-                'is_demo': True,
-            })
+        await generate_period_reports(gen_at=nowi - timedelta(hours=12 * period), is_demo=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1114,6 +1416,8 @@ async def startup():
     except Exception as e:  # noqa: BLE001
         logger.warning(f'Index creation warning: {e}')
     await seed_demo()
+    await ensure_scheduler()
+    asyncio.create_task(scheduler_loop())
 
 
 @app.on_event('shutdown')
